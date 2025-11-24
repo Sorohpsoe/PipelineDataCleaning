@@ -1,59 +1,10 @@
 ##############################################################
-# Movie Data Pipeline - CSC1142
-#
-# This PySpark script:
-# - loads the “Millions of Movies” dataset
-# - loads a Letterboxd dataset
-# - cleans and normalizes movie titles
-# - cleans budget and revenue values
-# - normalizes genres
-# - joins both datasets (only movies present in both)
-# - exports a final analytics dataset:
-#       [title, genres, letterboxd_rating, budget, revenue]
-##############################################################
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    lower, regexp_replace, trim, col
-)
-
-
-##############################################################
-# Helper function to clean movie titles
-##############################################################
-
-def clean_title(df, source_column_name):
-    """
-    Create a normalized version of the movie title to improve matching
-    between datasets.
-
-    Steps:
-    - convert to lowercase
-    - remove non-alphanumeric characters
-    - trim whitespace
-
-    Returns:
-    - DataFrame with a new column 'title_clean'
-    """
-    return df.withColumn(
-        "title_clean",
-        trim(
-            regexp_replace(
-                lower(col(source_column_name)),
-                r"[^a-z0-9 ]",
-                ""  # keep only letters, digits and spaces
-            )
-        )
-    )
-
-
-##############################################################
 ##############################################################
 # Movie Data Pipeline - CSC1142
 #
 # This PySpark script:
 # - downloads datasets (if needed)
-# - loads the “Millions of Movies” dataset
+# - loads the "Millions of Movies" dataset
 # - loads a Letterboxd dataset
 # - cleans and normalizes movie titles
 # - cleans budget and revenue values
@@ -64,7 +15,6 @@ def clean_title(df, source_column_name):
 ##############################################################
 
 from pathlib import Path
-import runpy
 import sys
 
 from pyspark.sql import SparkSession
@@ -88,29 +38,6 @@ def clean_title(df, source_column_name):
             )
         )
     )
-
-
-def run_downloader_if_needed():
-    """Run the scripts/download_from_kaggle.py script to ensure files exist.
-
-    This uses runpy to execute the script in-process; failures are logged
-    but do not stop the pipeline so the user can inspect issues.
-    """
-    script_path = Path(__file__).resolve().parent / "scripts" / "download_from_kaggle.py"
-    if not script_path.exists():
-        # try project-level scripts folder
-        script_path = Path.cwd() / "scripts" / "download_from_kaggle.py"
-
-    if not script_path.exists():
-        print(f"Downloader script not found at {script_path}. Skipping download step.")
-        return
-
-    print(f"Running downloader: {script_path}")
-    try:
-        runpy.run_path(str(script_path), run_name="__main__")
-    except Exception as e:
-        print(f"Downloader failed: {e}")
-
 
 def find_csv_path(keywords, base_dir=Path("data") / "input"):
     """Search recursively under base_dir for a CSV whose filename contains any keyword.
@@ -147,8 +74,8 @@ def pick_column(cols, candidates):
 
 def main():
 
-    # Ensure data is present (attempt to download if missing)
-    run_downloader_if_needed()
+    # Datasets are expected to be placed manually in `data/input`.
+    # The automatic downloader step has been disabled.
 
     ##########################################################
     # 1. Initialize Spark

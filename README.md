@@ -38,4 +38,31 @@ Notes and behavior
 - The Streamlit dashboard loads the CSV using Spark and converts it to pandas for display. This is fine for modest datasets (the current dataset is ~8k rows). For very large datasets, consider adding server-side pagination or writing summarized results.
 
 If you want changes (different filters, deterministic deduplication, extra charts), tell me which behavior you'd like and I can update the pipeline or dashboard.
+# Auto-download datasets using Kaggle (optional)
+
+This repository includes a helper script `script/get_data.py` that can automatically download the required CSV files from Kaggle using the official Kaggle API. Use it only if you prefer automatic download; otherwise place the CSV files manually into `data/input/` as before.
+
+Prerequisites for `script/get_data.py`:
+- A Kaggle account and API credentials. Follow these steps:
+	1. Go to your Kaggle account settings: https://www.kaggle.com/settings/account
+	2. Under "API", click "Create New API Token" (or "Create Legacy API Key") to download `kaggle.json`.
+	3. Place `kaggle.json` in your user home `.kaggle` directory (Windows example): `C:\Users\<your_user>\.kaggle\kaggle.json`.
+	4. Ensure the file permissions are restricted (optional but recommended).
+
+How the script works
+- `script/get_data.py` will attempt to download two files:
+	- `movies.csv` from dataset `gsimonx37/letterboxd` and save it as `data/input/letterboxd.csv`.
+	- `movies.csv` from dataset `akshaypawar7/millions-of-movies` and save it as `data/input/TMDB.csv`.
+- If the CSV is delivered as a zip by the Kaggle API, the script extracts the CSV and removes the zip.
+
+Run the downloader (PowerShell):
+```powershell
+.\DataCleaning_env\Scripts\Activate.ps1
+python .\script\get_data.py
+```
+
+Notes
+- The script uses the Kaggle Python client (package `kaggle`). If you don't have it installed, install it with `pip install kaggle` in the activated environment.
+- If automatic download fails, the script prints an error and instructions to set up the Kaggle credentials; you can always place the CSV files manually in `data/input/`.
+
 # PipelineDataCleaning

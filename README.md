@@ -65,4 +65,3 @@ Notes
 - The script uses the Kaggle Python client (package `kaggle`). If you don't have it installed, install it with `pip install kaggle` in the activated environment.
 - If automatic download fails, the script prints an error and instructions to set up the Kaggle credentials; you can always place the CSV files manually in `data/input/`.
 
-# PipelineDataCleaning

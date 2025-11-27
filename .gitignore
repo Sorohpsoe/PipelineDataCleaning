@@ -1,3 +1,6 @@
 DataCleaning_env/
 __pycache__/
 data/input/*.csv
+data/output/*.csv
+data/output/*.crc
+output/

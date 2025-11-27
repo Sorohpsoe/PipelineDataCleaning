@@ -4,7 +4,7 @@
 #
 # This PySpark script:
 # - downloads datasets (if needed)
-# - loads the "Millions of Movies" dataset
+# - loads the "Millions of Movies"   dataset
 # - loads a Letterboxd dataset
 # - cleans and normalizes movie titles
 # - cleans budget and revenue values
@@ -16,10 +16,16 @@
 
 from pathlib import Path
 import sys
+import os
+import shutil
+import time
+import glob
 
 from pyspark.sql import SparkSession
+import csv
 from pyspark.sql.functions import (
-    lower, regexp_replace, trim, col, lit
+    lower, regexp_replace, trim, col, lit, when,
+    avg, first, max, round as spark_round
 )
 
 
@@ -89,6 +95,31 @@ def main():
     movies_csv = find_csv_path(["millions", "million", "movies"])
     letterboxd_csv = find_csv_path(["letterboxd", "letterbox", "lb", "movies"])
 
+    # If both searches returned the same file, try to pick the correct files
+    # when multiple CSVs exist in `data/input`. Prefer explicit names like
+    # 'tmdb' for the movies dataset and 'letterboxd' for the letterboxd dataset.
+    if movies_csv and letterboxd_csv and movies_csv == letterboxd_csv:
+        base = Path("data") / "input"
+        all_csvs = list(base.rglob("*.csv"))
+        # try exact heuristics first
+        tmdb = next((p for p in all_csvs if 'tmdb' in p.name.lower()), None)
+        lb = next((p for p in all_csvs if 'letterboxd' in p.name.lower()), None)
+        if tmdb and lb:
+            movies_csv = tmdb
+            letterboxd_csv = lb
+            print("Info: using", movies_csv, "for movies and", letterboxd_csv, "for letterboxd")
+        else:
+            # fallback: pick any different CSV for letterboxd
+            for p in all_csvs:
+                if p != movies_csv:
+                    # prefer a file whose name contains 'movie' or 'millions' for movies
+                    if 'movie' in p.name.lower() or 'millions' in p.name.lower():
+                        movies_csv = p
+                        continue
+                    letterboxd_csv = p
+                    print("Warning: same file matched both datasets; using", letterboxd_csv, "for letterboxd")
+                    break
+
     if not movies_csv or not letterboxd_csv:
         print("Could not find required CSV files under data/input.")
         print("Found:")
@@ -132,22 +163,42 @@ def main():
     ##########################################################
     # 6. Clean budget & revenue (convert to integers)
     ##########################################################
+    # Parse numeric budget & revenue robustly: tolerate decimals like '123.0'
+    # and malformed values (set to NULL). Use LONG to avoid overflow on large values.
+    num_regex = r'^[0-9]+(\.[0-9]+)?$'
+
     if "budget" in movies.columns:
-        movies = movies.withColumn("budget", col("budget").cast("int"))
+        movies = movies.withColumn(
+            "budget_clean",
+            when(col("budget").cast("string").rlike(num_regex),
+                 col("budget").cast("double").cast("long")
+                 ).otherwise(lit(None).cast("long"))
+        ).drop("budget").withColumnRenamed("budget_clean", "budget")
     else:
-        movies = movies.withColumn("budget", lit(None).cast("int"))
+        movies = movies.withColumn("budget", lit(None).cast("long"))
 
     if "revenue" in movies.columns:
-        movies = movies.withColumn("revenue", col("revenue").cast("int"))
+        movies = movies.withColumn(
+            "revenue_clean",
+            when(col("revenue").cast("string").rlike(num_regex),
+                 col("revenue").cast("double").cast("long")
+                 ).otherwise(lit(None).cast("long"))
+        ).drop("revenue").withColumnRenamed("revenue_clean", "revenue")
     else:
-        movies = movies.withColumn("revenue", lit(None).cast("int"))
+        movies = movies.withColumn("revenue", lit(None).cast("long"))
 
     # Optional: remove movies with missing or zero financial data if columns exist
+    # Exclude movies with missing or extremely small financials. Define
+    # reasonable minimum thresholds so that tiny/placeholder values are ignored.
+    BUDGET_MIN = 1000   # euros/dollars (adjust if you want a different floor)
+    REVENUE_MIN = 1000
+
     if "budget" in movies.columns and "revenue" in movies.columns:
         movies = movies.filter(
-            (col("budget").isNotNull()) & (col("budget") > 0) &
-            (col("revenue").isNotNull()) & (col("revenue") > 0)
+            (col("budget").isNotNull()) & (col("budget") >= BUDGET_MIN) &
+            (col("revenue").isNotNull()) & (col("revenue") >= REVENUE_MIN)
         )
+        print(f"Filtering movies with budget>={BUDGET_MIN} and revenue>={REVENUE_MIN}")
 
     ##########################################################
     # 7. Normalize genres (replace | with comma) if present
@@ -155,35 +206,99 @@ def main():
     if "genres" in movies.columns:
         movies = movies.withColumn("genres", regexp_replace(col("genres"), r"\|", ", "))
     else:
-        movies = movies.withColumn("genres", lit(None))
+        # ensure genres has a STRING type (avoid VOID/NULL type that Spark CSV writer rejects)
+        movies = movies.withColumn("genres", lit(None).cast("string"))
 
     ##########################################################
     # 8. Join datasets (only movies present in both)
+    # Alias dataframes so column references are unambiguous after the join
     ##########################################################
+    movies = movies.alias("m")
+    letterboxd = letterboxd.alias("l")
+
     joined = movies.join(letterboxd, on="title_clean", how="inner")
     print("Movies present in both datasets:", joined.count())
 
     ##########################################################
     # 9. Select final output columns
     ##########################################################
-    rating_expr = col(rating_col).alias("letterboxd_rating") if rating_col else lit(None).alias("letterboxd_rating")
+    # Clean and validate letterboxd rating: numeric, decimal dot normalized,
+    # then ensure values are between 0 and 5 (otherwise NULL).
+    if rating_col:
+        raw_rating = trim(regexp_replace(col(f"l.{rating_col}").cast("string"), ",", "."))
+        # accept simple numeric formats like 3.5 or 4
+        rating_valid = raw_rating.rlike(num_regex)
+        rating_val = when(rating_valid, raw_rating.cast("double")).otherwise(lit(None).cast("double"))
+        rating_expr = when((rating_val.isNotNull()) & (rating_val.between(0.0, 5.0)), rating_val).otherwise(lit(None).cast("double")).alias("letterboxd_rating")
+    else:
+        rating_expr = lit(None).cast("double").alias("letterboxd_rating")
 
     final = joined.select(
-        col(movies_title_col).alias("title"),
-        col("genres"),
+        col(f"m.{movies_title_col}").alias("title"),
+        col("m.genres"),
         rating_expr,
-        col("budget"),
-        col("revenue")
+        col("m.budget"),
+        col("m.revenue")
     )
+
+    # Remove rows with no Letterboxd rating (we only want movies with a rating)
+    final = final.filter(col("letterboxd_rating").isNotNull())
 
     final.show(20, truncate=False)
 
     ##########################################################
-    # 10. Export the final dataset
+    # 9.5 Remove duplicate titles (keep first occurrence)
     ##########################################################
-    output_path = "output/movies_final"
-    final.write.csv(output_path, header=True, mode="overwrite")
-    print("Final dataset written to:", output_path)
+    # Use dropDuplicates on the `title` column to remove exact-title duplicates.
+    # Note: dropDuplicates keeps an arbitrary row for each title (first encountered).
+    final = final.dropDuplicates(["title"])
+    print("Rows after deduplication:", final.count())
+
+    ##########################################################
+    # 10. Export the final dataset as a single CSV in data/output
+    ##########################################################
+    out_dir = Path("data") / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final_file = out_dir / "movies_final.csv"
+
+    # If a previous final file exists, remove it so the new file overwrites it
+    if final_file.exists():
+        try:
+            final_file.unlink()
+        except Exception:
+            try:
+                os.remove(str(final_file))
+            except Exception:
+                # If removal fails, proceed — later move will overwrite if possible
+                pass
+
+    # Try to write a single CSV using Spark (coalesce to 1 partition),
+    # then move the produced part file into the desired final path.
+    # Remove stray backslashes and normalize internal double-quotes in titles
+    final = final.withColumn("title", regexp_replace(col("title"), r"\\\\", ""))
+    # Replace literal double-quote characters with single quote to avoid complex CSV escaping
+    final = final.withColumn("title", regexp_replace(col("title"), '"', "'"))
+
+    tmp_dir = out_dir / f"tmp_spark_write_{int(time.time())}"
+    # Write a single-part CSV with Spark and move the produced part file to the final location
+    # Write with options to prefer doubled quotes rather than backslash-escapes
+    final.coalesce(1).write\
+        .option("header", True)\
+        .option("quote", '"')\
+        .option("escape", '"')\
+        .option("escapeQuotes", False)\
+        .csv(str(tmp_dir), mode="overwrite")
+    part_files = list(tmp_dir.glob("part-*.csv"))
+    if not part_files:
+        raise RuntimeError("Spark produced no part-*.csv file in temporary output")
+    part = part_files[0]
+    # move the part file to final location
+    if final_file.exists():
+        final_file.unlink()
+    shutil.move(str(part), str(final_file))
+    # cleanup temporary directory
+    shutil.rmtree(str(tmp_dir), ignore_errors=True)
+    print("Final dataset written to:", final_file)
 
     ##########################################################
     # 11. Stop Spark

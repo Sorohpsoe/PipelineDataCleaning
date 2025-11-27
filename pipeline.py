@@ -25,6 +25,7 @@ from pyspark.sql import SparkSession
 import csv
 from pyspark.sql.functions import (
     lower, regexp_replace, trim, col, lit, when,
+    regexp_extract,
     avg, first, max, round as spark_round
 )
 
@@ -213,10 +214,39 @@ def main():
     # 8. Join datasets (only movies present in both)
     # Alias dataframes so column references are unambiguous after the join
     ##########################################################
+    # Try to detect date/year columns in both dataframes so we can avoid merging
+    # different films that only share the same title.
+    movie_date_col = pick_column(movies.columns, ["release_date", "released", "release", "year", "date"])
+    lb_date_col = pick_column(letterboxd.columns, ["release_date", "released", "release", "year", "date"])
+
+    if movie_date_col and lb_date_col:
+        # build normalized year columns from free-form date fields
+        # prefer exact 4-digit year, fallback to extracting first 4-digit group
+        # safer year extraction: extract a 4-digit group and only cast when present
+        m_extracted = regexp_extract(col(movie_date_col).cast("string"), r"([0-9]{4})", 1)
+        movies = movies.withColumn(
+            "year",
+            when(col(movie_date_col).rlike(r'^[0-9]{4}$'), col(movie_date_col).cast("int"))
+            .when(m_extracted.rlike(r'^[0-9]{4}$'), m_extracted.cast("int"))
+            .otherwise(lit(None).cast("int"))
+        )
+        l_extracted = regexp_extract(col(lb_date_col).cast("string"), r"([0-9]{4})", 1)
+        letterboxd = letterboxd.withColumn(
+            "year",
+            when(col(lb_date_col).rlike(r'^[0-9]{4}$'), col(lb_date_col).cast("int"))
+            .when(l_extracted.rlike(r'^[0-9]{4}$'), l_extracted.cast("int"))
+            .otherwise(lit(None).cast("int"))
+        )
+        print(f"Detected date columns: movies->{movie_date_col}, letterboxd->{lb_date_col}; joining on title_clean+year")
+        join_on = ["title_clean", "year"]
+    else:
+        print("Date columns not detected in both datasets; joining on title_clean only")
+        join_on = "title_clean"
+
     movies = movies.alias("m")
     letterboxd = letterboxd.alias("l")
 
-    joined = movies.join(letterboxd, on="title_clean", how="inner")
+    joined = movies.join(letterboxd, on=join_on, how="inner")
     print("Movies present in both datasets:", joined.count())
 
     ##########################################################
